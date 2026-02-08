@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Operational Revenue Signal Monitor</title>
+  <link rel="stylesheet" href="/static/main.css" />
+
+  <!-- Chart.js (must be in HEAD or before your script uses it) -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+
+<body>
+  <div class="app">
+    <!-- SIDEBAR -->
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <div class="sidebar-title">Decision Policy Controls</div>
+        <div class="sidebar-sub">Local thresholds</div>
+      </div>
+
+      <div class="control">
+        <label for="warnThreshold">Revenue WARN Threshold</label>
+        <input id="warnThreshold" type="range" min="0" max="5000" value="500" step="10">
+        <div class="control-meta">
+          <span class="chip">WARN</span>
+          <span class="value"><span id="warnVal">500</span></span>
+        </div>
+      </div>
+
+      <div class="control">
+        <label for="critThreshold">Revenue CRIT Threshold</label>
+        <input id="critThreshold" type="range" min="0" max="5000" value="200" step="10">
+        <div class="control-meta">
+          <span class="chip crit">CRIT</span>
+          <span class="value"><span id="critVal">200</span></span>
+        </div>
+      </div>
+
+      <button id="refreshBtn" class="btn">Refresh</button>
+
+      <div class="sidebar-footer">
+        <span class="dot"></span>
+        <span>Auto refresh: every 5 seconds</span>
+      </div>
+    </aside>
+
+    <!-- MAIN -->
+    <main class="main">
+      <!-- HERO -->
+      <section class="hero">
+        <h1>Operational Revenue Signal Monitor</h1>
+        <p class="sub">Executive dashboard — revenue monitoring (5-minute windows)</p>
+      </section>
+
+      <!-- KPI ROW -->
+      <section class="kpis">
+        <div class="card glass">
+          <div class="label">Current Revenue (latest)</div>
+          <div class="big" id="currentRevenue">—</div>
+          <div class="muted" id="currentRevenueMeta">Updated just now</div>
+        </div>
+
+        <div class="card glass">
+          <div class="label">Status</div>
+          <div class="status-pill ok" id="statusPill">OK</div>
+          <div class="muted" id="statusReason">Based on thresholds</div>
+        </div>
+
+        <div class="card glass">
+          <div class="label">Rows</div>
+          <div class="big" id="rowsCount">—</div>
+          <div class="muted">Latest KPI windows returned</div>
+        </div>
+      </section>
+
+      <!-- CHART -->
+      <section class="card glass chart-card">
+        <div class="card-head">
+          <div class="card-title">Revenue Trend</div>
+          <div class="card-sub">Last windows (newest → oldest)</div>
+        </div>
+        <div class="chart-wrap">
+          <canvas id="revChart"></canvas>
+        </div>
+      </section>
+
+      <!-- TABLE -->
+      <section class="card glass table-card">
+        <div class="card-head">
+          <div class="card-title">Latest KPI Windows</div>
+          <div class="card-sub">Realtime extract from CSV</div>
+        </div>
+
+        <div class="table-wrap">
+          <table id="kpiTable">
+            <thead>
+              <tr>
+                <th>window_start</th>
+                <th>window_end</th>
+                <th class="num">events_count</th>
+                <th class="num">purchases_count</th>
+                <th class="num">revenue</th>
+                <th class="num">payment_fail_rate</th>
+                <th class="num">active_users_30m</th>
+                <th class="num">data_freshness_minutes</th>
+                <th>alert_flag</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+  </div>
+
+<script>
+  const warn = document.getElementById("warnThreshold");
+  const crit = document.getElementById("critThreshold");
+  const warnVal = document.getElementById("warnVal");
+  const critVal = document.getElementById("critVal");
+  const refreshBtn = document.getElementById("refreshBtn");
+
+  warn.oninput = () => warnVal.textContent = warn.value;
+  crit.oninput = () => critVal.textContent = crit.value;
+
+  function statusFromRevenue(r) {
+    const rev = Number(r ?? 0);
+    if (rev <= Number(crit.value)) return "CRIT";
+    if (rev <= Number(warn.value)) return "WARN";
+    return "OK";
+  }
+
+  function fmtNumber(x) {
+    const n = Number(x);
+    if (!Number.isFinite(n)) return "—";
+    return n.toLocaleString(undefined, { maximumFractionDigits: 2 });
+  }
+
+  function setStatusPill(status) {
+    const pill = document.getElementById("statusPill");
+    pill.textContent = status;
+
+    pill.classList.remove("ok", "warn", "crit");
+    if (status === "OK") pill.classList.add("ok");
+    if (status === "WARN") pill.classList.add("warn");
+    if (status === "CRIT") pill.classList.add("crit");
+  }
+
+  // Chart.js instance
+  let revenueChart = null;
+
+  function renderRevenueChart(rows) {
+    const ctx = document.getElementById("revChart");
+    if (!ctx) return;
+
+    // Newest -> oldest labels (short)
+    const labels = rows.map(r => {
+      const ws = (r.window_start ?? "").toString();
+      // show HH:MM if available
+      const match = ws.match(/T(\d\d:\d\d)/);
+      return match ? match[1] : ws.slice(0, 10);
+    });
+
+    const values = rows.map(r => Number(r.revenue ?? 0));
+
+    if (revenueChart) revenueChart.destroy();
+
+    revenueChart = new Chart(ctx, {
+      type: "line",
+      data: {
+        labels,
+        datasets: [{
+          label: "Revenue",
+          data: values,
+          tension: 0.35,
+          borderWidth: 2,
+          pointRadius: 2
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: { display: true }
+        },
+        scales: {
+          x: {
+            grid: { display: false },
+            ticks: { color: "rgba(255,255,255,0.7)" }
+          },
+          y: {
+            grid: { color: "rgba(255,255,255,0.08)" },
+            ticks: { color: "rgba(255,255,255,0.7)" }
+          }
+        }
+      }
+    });
+  }
+
+  async function refresh() {
+    const res = await fetch("/api/kpis/latest?limit=50");
+    const data = await res.json();
+
+    document.getElementById("rowsCount").textContent = data.count ?? 0;
+
+    const rows = (data.rows || []);
+    if (rows.length) {
+      const latest = rows[0];
+      const rev = latest.revenue ?? 0;
+
+      document.getElementById("currentRevenue").textContent = fmtNumber(rev);
+
+      const status = statusFromRevenue(rev);
+      setStatusPill(status);
+
+      // optional status reason
+      const reason = (latest.alert_reason ?? null);
+      document.getElementById("statusReason").textContent =
+        reason ? reason : `Based on WARN=${warn.value}, CRIT=${crit.value}`;
+
+      document.getElementById("currentRevenueMeta").textContent =
+        `Latest window: ${(latest.window_start ?? "").toString().slice(0, 19)}`;
+    }
+
+    // Table render
+    const tbody = document.querySelector("#kpiTable tbody");
+    tbody.innerHTML = "";
+    rows.forEach(row => {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `
+        <td>${row.window_start ?? ""}</td>
+        <td>${row.window_end ?? ""}</td>
+        <td class="num">${row.events_count ?? ""}</td>
+        <td class="num">${row.purchases_count ?? ""}</td>
+        <td class="num">${fmtNumber(row.revenue)}</td>
+        <td class="num">${row.payment_fail_rate ?? ""}</td>
+        <td class="num">${row.active_users_30m ?? ""}</td>
+        <td class="num">${row.data_freshness_minutes ?? ""}</td>
+        <td>${row.alert_flag ?? ""}</td>
+      `;
+      tbody.appendChild(tr);
+    });
+
+    // Chart uses last N rows (reverse for trend left->right older->newer if you want)
+    const chartRows = rows.slice(0, 12).reverse();
+    renderRevenueChart(chartRows);
+  }
+
+  refreshBtn.onclick = refresh;
+
+  refresh();
+  setInterval(refresh, 5000);
+</script>
+
+</body>
+</html>
